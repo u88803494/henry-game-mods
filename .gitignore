@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+
+# Build intermediates — regenerate with scripts/build.py → cards.py → extra.py → merge.py
+aoe2/tw-upgrade-stats/scripts/result.json
+aoe2/tw-upgrade-stats/scripts/stats.json
+aoe2/tw-upgrade-stats/scripts/cards.json
+aoe2/tw-upgrade-stats/scripts/extra.json
+aoe2/tw-upgrade-stats/scripts/final.json
