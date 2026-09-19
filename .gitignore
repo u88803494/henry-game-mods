@@ -8,3 +8,9 @@ aoe2/tw-upgrade-stats/scripts/stats.json
 aoe2/tw-upgrade-stats/scripts/cards.json
 aoe2/tw-upgrade-stats/scripts/extra.json
 aoe2/tw-upgrade-stats/scripts/final.json
+
+# Troy save-parser: outputs derived from the user's own game install / saves.
+# loc_zh.json etc. contain SEGA/Creative Assembly's own text — never commit.
+troy/save-parser/*.json
+troy/save-parser/*.pkl
+troy/save-parser/*.loc

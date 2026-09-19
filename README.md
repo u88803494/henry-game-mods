@@ -1,12 +1,14 @@
 # Henry's Game Mods
 
-Mods I've built for games I actually play — organized one folder per game.
+Mods (and the occasional tool) I've built for games I actually play —
+organized one folder per game.
 
-我實際在玩的遊戲寫的模組，一個資料夾一個遊戲。
+我實際在玩的遊戲寫的模組（偶爾也有工具），一個資料夾一個遊戲。
 
 ## Games
 
 - [`aoe2/`](aoe2/) — Age of Empires II: Definitive Edition
+- [`troy/`](troy/) — A Total War Saga: TROY
 
 ## License
 
