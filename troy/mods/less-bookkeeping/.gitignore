@@ -1,0 +1,3 @@
+# build output — regenerate with build.py
+*.pack
+__pycache__/
