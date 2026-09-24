@@ -14,3 +14,6 @@ aoe2/tw-upgrade-stats/scripts/final.json
 troy/save-parser/*.json
 troy/save-parser/*.pkl
 troy/save-parser/*.loc
+
+# Troy save-parser watcher output
+troy/save-parser/*.jsonl
