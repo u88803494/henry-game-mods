@@ -44,6 +44,12 @@ import time
 MAGIC = b"PFH5"
 HEADER_SIZE = 0x1C
 
+# Header bitmask flags. Vanilla TROY packs are 0x01 (plain release), so these
+# paths are untested against the shipped files -- but third-party packs do set
+# them, and misreading either one shifts every index entry.
+FLAG_ENCRYPTED_INDEX = 0x08
+FLAG_INDEX_WITH_TIMESTAMPS = 0x10
+
 
 def read_pack(path):
     """Parse a PackFile. Returns (raw_bytes, {path: (offset, size, flag)}, meta)."""
@@ -51,16 +57,23 @@ def read_pack(path):
     if data[:4] != MAGIC:
         raise ValueError(f"not a PFH5 PackFile: magic is {data[:4]!r}")
 
-    _bitmask, _dep_count, _dep_size, file_count, index_size, _ts = struct.unpack_from(
+    bitmask, _dep_count, dep_size, file_count, index_size, _ts = struct.unpack_from(
         "<IIIIII", data, 4
     )
+    if bitmask & FLAG_ENCRYPTED_INDEX:
+        raise ValueError("encrypted index is not supported")
 
-    offset = HEADER_SIZE
+    # The dependency block sits between the header and the index. Vanilla packs
+    # declare no dependencies so this is 0, but a mod that depends on another
+    # pack will list it here and the index starts after it.
+    offset = HEADER_SIZE + dep_size
     index_end = offset + index_size
     entries = []
     while offset < index_end:
         size = struct.unpack_from("<I", data, offset)[0]
         offset += 4
+        if bitmask & FLAG_INDEX_WITH_TIMESTAMPS:
+            offset += 4          # per-entry timestamp, present only when flagged
         flag = data[offset]
         offset += 1
         end = data.index(b"\0", offset)

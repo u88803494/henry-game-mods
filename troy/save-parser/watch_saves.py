@@ -21,14 +21,41 @@ import threading
 import time
 import traceback
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, "..", "db-parser"))
 from esf_parser import parse_esf_bytes
+from loc import display_name as loc_display_name, load_cached
 
 DEFAULT_SAVE_DIR = os.path.expanduser(
     "~/Library/Application Support/Feral Interactive/Troy/VFS/User/AppData/"
     "Roaming/The Creative Assembly/Troy/save_games"
 )
-DEFAULT_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapshots.jsonl")
+DEFAULT_OUT = os.path.join(HERE, "snapshots.jsonl")
+
+# Name lookups come from ../db-parser/loc.py so there is exactly one copy of
+# that logic. This reads the JSON cache rather than the 12 MB pack, because a
+# watcher parses saves constantly and shouldn't re-read the language pack each
+# time. Rebuild it with:
+#
+#   python3 ../db-parser/loc.py .../local_zh.pack --export loc_zh.json
+LOC_PATH = os.path.join(HERE, "loc_zh.json")
+
+
+def load_loc(path=LOC_PATH):
+    """The exported name index, or an empty one if the cache isn't built yet."""
+    try:
+        return load_cached(path)
+    except (OSError, ValueError):
+        return {"full": {}, "short": {}}
+
+
+LOC = load_loc()
+
+
+def display_name(key):
+    """Readable name for an internal key, falling back to the key itself."""
+    return loc_display_name(LOC, key, key)
 
 # Resource pools worth tracking; god attitudes and the Mythos pools are skipped.
 RESOURCE_KEYS = {
@@ -105,6 +132,7 @@ def read_units(faction):
             continue
         units.append({
             "key": key,
+            "name": display_name(key),
             "men": prims[1],
             "max_men": prims[2],
             "exp": prims[5],
@@ -121,7 +149,7 @@ def read_buildings(faction):
         # Empty slots only carry the generic horde_primary/horde_secondary labels.
         if key in (None, "horde_primary", "horde_secondary"):
             key = None
-        slots.append({"slot": index, "building": key})
+        slots.append({"slot": index, "building": key, "name": display_name(key) if key else None})
     return slots
 
 

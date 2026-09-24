@@ -1,45 +1,50 @@
 #!/usr/bin/env python3
-"""Read TROY's localisation tables, so db keys can be shown as in-game names.
+"""Read TROY's localisation tables, so db and save keys can be shown as names.
 
-    python3 loc.py <pack> [regex]        # list matching key/value pairs
-    python3 loc.py local_zh.pack growth  # e.g. -> 家奴, 戰奴, 被俘的奴隸
+    python3 loc.py <pack>                    # entry counts
+    python3 loc.py <pack> growth             # list keys matching a regex
+    python3 loc.py <pack> --export loc.json  # cache to JSON for other tools
 
 Or import it:
 
-    from loc import load_from_pack, display_name
+    from loc import load_index, display_name
 
-    loc = load_from_pack(".../local_zh.pack")
-    display_name(loc, "troy_amazons_penthesilea_horde_growth_3")   # '家奴'
+    index = load_index(".../local_zh.pack")
+    display_name(index, "troy_dlc1_ama_pen_furies")     # '憤怒者'
+    display_name(index, "troy_amazons_penthesilea_horde_growth_3")   # '家奴'
 
-Why this matters
-----------------
-Everything else in this directory speaks in keys — `growth_3`, `resources_2`,
-`troy_sling_stone_poor`. The game speaks in names. Without this, any analysis
-has to be translated by hand before it means anything to a player.
+Why two indexes
+---------------
+Loc keys are `<table>_<field>_<record key>`, e.g.
 
-The language packs are SEGA/Creative Assembly's own text and are NOT
-redistributed here. Read them from wherever the game is installed, e.g.
-`.../TroyData/data/local_zh.pack` (Traditional Chinese) or `local_en.pack`.
+    land_units_onscreen_name_troy_dlc1_ama_pen_furies
+
+but saves and db tables store the bare record key. `full` keeps the loc keys
+verbatim; `short` strips the table prefix so a record key looks up directly.
+Some tables also glue a culture suffix onto the record key, which has to come
+off the right-hand side as well.
+
+The language packs are SEGA/Creative Assembly's own text and are **not**
+redistributed here. Read them from the game install (`local_zh.pack` for
+Traditional Chinese, `local_en.pack` for English), and treat any exported JSON
+as a local cache — it is gitignored for the same reason.
 
 LOC format
 ----------
-    FF FE                byte order mark
-    "LOC"                3 bytes, ASCII
-    00                   one padding byte
-    u32                  version (1 in the shipped files)
-    u32                  entry count
-    entries...           key + value + one trailing bool byte each
+    FF FE        byte order mark
+    "LOC"        3 bytes ASCII
+    00           one padding byte
+    u32          version (1 in shipped files)
+    u32          entry count
+    entries...   key + text + one trailing tooltip flag byte each
 
-Strings are u16 *character* count followed by that many UTF-16LE code units --
-note the count is characters, not bytes, so the byte length is twice that.
-
-As with db.py, a correct parse lands exactly on the end of the blob; anything
-else means the format assumption is wrong, so `parse_loc` raises rather than
-returning a plausible-looking partial result.
+Strings are a u16 *character* count followed by that many UTF-16LE units —
+characters, not bytes. As with db.py, a correct parse lands exactly on the end
+of the blob; `parse_loc` raises rather than returning a plausible partial.
 """
 
 import argparse
-import os
+import json
 import re
 import struct
 import sys
@@ -48,84 +53,118 @@ from packfile import read_pack
 
 BOM = b"\xff\xfe"
 MAGIC = b"LOC"
-DEFAULT_ENTRY = "text\\localisation__.loc"
 
-# How the game names things, by table. Learned by inspecting local_zh.pack:
-# a key may appear under several of these, so lookups try them in order.
-#
-# `building_culture_variants_name_` is the odd one out -- the subculture is
-# appended directly to the building key with no separator, which is why
-# display_name() also tries a prefix match for it.
-NAME_PATTERNS = (
-    "building_culture_variants_name_{key}",
-    "building_levels_onscreen_name_{key}",
-    "land_units_onscreen_name_{key}",
-    "main_units_onscreen_name_{key}",
-    "units_custom_battle_permissions_onscreen_name_{key}",
-    "missions_localised_title_{key}",
-    "campaign_localised_strings_localised_string_{key}",
-    "factions_screen_name_{key}",
-    "regions_onscreen_{key}",
-    "technologies_onscreen_name_{key}",
-    "unit_description_short_texts_text_{key}",
+# Loc keys are "<table>_<field>_<record key>". These are the tables whose
+# record keys actually appear in saves and db rows.
+PREFIXES = (
+    "land_units_onscreen_name_",
+    "main_units_onscreen_name_",
+    "unit_class_onscreen_name_",
+    "building_culture_variants_name_",
+    "building_levels_onscreen_name_",
+    "regions_onscreen_",
+    "regions_battle_name_",
+    "factions_screen_name_",
+    "technologies_onscreen_name_",
+    "character_skills_localised_name_",
+    "ancillaries_onscreen_name_",
+    "missions_localised_title_",
+)
+
+# building_culture_variants keys append a subculture straight onto the record
+# key with no separator, so it has to be trimmed from the right as well.
+SUFFIXES = (
+    "troy_amazons_sbc_horde_amazons",
+    "troy_rem_sbc_hordes_aethiopians",
 )
 
 
 def parse_loc(blob):
-    """Parse a .loc blob into {key: value}. Raises if it doesn't consume exactly."""
+    """Parse one .loc blob into ({key: text}, version). Raises unless exact."""
     if blob[:2] != BOM or blob[2:5] != MAGIC:
-        raise ValueError(f"not a LOC file: starts with {blob[:5]!r}")
+        raise ValueError(f"not a LOC table: starts with {blob[:5]!r}")
 
     pos = 6  # BOM + "LOC" + one padding byte
-    version = struct.unpack_from("<I", blob, pos)[0]
-    pos += 4
-    count = struct.unpack_from("<I", blob, pos)[0]
-    pos += 4
-
-    def read_string(at):
-        length = struct.unpack_from("<H", blob, at)[0]
-        at += 2
-        text = blob[at:at + length * 2].decode("utf-16-le", "replace")
-        return text, at + length * 2
+    version, count = struct.unpack_from("<II", blob, pos)
+    pos += 8
 
     entries = {}
     for _ in range(count):
-        key, pos = read_string(pos)
-        value, pos = read_string(pos)
-        pos += 1  # trailing bool
-        entries[key] = value
+        values = []
+        for _ in range(2):  # key, then text
+            length = struct.unpack_from("<H", blob, pos)[0]
+            pos += 2
+            values.append(blob[pos:pos + length * 2].decode("utf-16-le", "replace"))
+            pos += length * 2
+        pos += 1  # tooltip flag
+        entries[values[0]] = values[1]
 
     if pos != len(blob):
-        raise ValueError(
-            f"LOC parse consumed {pos} of {len(blob)} bytes -- format mismatch"
-        )
+        raise ValueError(f"LOC parse consumed {pos} of {len(blob)} bytes")
     return entries, version
 
 
-def load_from_pack(pack_path, entry=DEFAULT_ENTRY):
-    """Pull the localisation table straight out of a language pack."""
+def strip_key(loc_key):
+    """Reduce a loc key to the bare record key that saves and db rows store."""
+    for prefix in PREFIXES:
+        if not loc_key.startswith(prefix):
+            continue
+        bare = loc_key[len(prefix):]
+        for suffix in SUFFIXES:
+            if bare.endswith(suffix):
+                bare = bare[:-len(suffix)]
+                break
+        return bare or None
+    return None
+
+
+def load_index(pack_path):
+    """Read every .loc in a language pack. Returns {'full': ..., 'short': ...}."""
     data, index, _meta = read_pack(pack_path)
-    if entry not in index:
-        available = [k for k in index if k.endswith(".loc")]
-        raise KeyError(f"{entry} not in pack; found {available}")
-    offset, size, _flag = index[entry]
-    entries, _version = parse_loc(data[offset:offset + size])
-    return entries
+
+    full = {}
+    tables = 0
+    for name in sorted(index):
+        if not name.lower().endswith(".loc"):
+            continue
+        offset, size, _flag = index[name]
+        if size == 0:
+            continue
+        try:
+            entries, _version = parse_loc(data[offset:offset + size])
+        except ValueError as exc:
+            print(f"[skip] {name}: {exc}", file=sys.stderr)
+            continue
+        full.update(entries)
+        tables += 1
+
+    short = {}
+    for loc_key, text in full.items():
+        bare = strip_key(loc_key)
+        if bare and bare not in short:
+            short[bare] = text
+
+    return {"full": full, "short": short, "tables": tables}
 
 
-def display_name(loc, key, default=None):
-    """Best-effort key -> in-game name, trying each known naming convention."""
-    for pattern in NAME_PATTERNS:
-        candidate = pattern.format(key=key)
-        if candidate in loc:
-            return loc[candidate]
+def load_cached(path):
+    """Load a JSON cache written by --export."""
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)
 
-    # building_culture_variants_name_ appends a subculture with no separator,
-    # so an exact match fails and we have to look for the prefix instead.
-    prefix = "building_culture_variants_name_" + key
-    for loc_key, value in loc.items():
-        if loc_key.startswith(prefix):
-            return value
+
+def display_name(index, key, default=None):
+    """Record key -> in-game name. Accepts an index or a bare {key: text} dict."""
+    short = index.get("short") if isinstance(index, dict) and "short" in index else index
+    if key in short:
+        return short[key]
+
+    # Fall back to scanning the full table for a prefixed form, which covers
+    # tables not listed in PREFIXES.
+    full = index.get("full") if isinstance(index, dict) and "full" in index else {}
+    for loc_key, text in full.items():
+        if loc_key.endswith(key):
+            return text
     return default
 
 
@@ -133,23 +172,31 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("pack", help="a language pack, e.g. local_zh.pack")
     parser.add_argument("pattern", nargs="?", help="regex filter on the key")
-    parser.add_argument("--entry", default=DEFAULT_ENTRY)
+    parser.add_argument("--export", metavar="PATH", help="write {full, short} JSON")
     parser.add_argument("--limit", type=int, default=40)
     args = parser.parse_args()
 
-    loc = load_from_pack(args.pack, args.entry)
-    print(f"{len(loc):,} entries")
+    index = load_index(args.pack)
+    print(
+        f"{index['tables']} loc tables, {len(index['full']):,} entries "
+        f"({len(index['short']):,} keyed by record)",
+        file=sys.stderr,
+    )
 
-    if not args.pattern:
-        return 0
+    if args.export:
+        with open(args.export, "w", encoding="utf-8") as handle:
+            json.dump({"full": index["full"], "short": index["short"]},
+                      handle, ensure_ascii=False)
+        print(f"-> {args.export}", file=sys.stderr)
 
-    regex = re.compile(args.pattern, re.I)
-    hits = [(k, v) for k, v in loc.items() if regex.search(k)]
-    print(f"{len(hits):,} matching '{args.pattern}'\n")
-    for key, value in sorted(hits)[:args.limit]:
-        print(f"  {key:76s} {value}")
-    if len(hits) > args.limit:
-        print(f"  ... and {len(hits) - args.limit:,} more")
+    if args.pattern:
+        regex = re.compile(args.pattern, re.I)
+        hits = [(k, v) for k, v in index["short"].items() if regex.search(k)]
+        print(f"{len(hits):,} record keys matching '{args.pattern}'\n")
+        for key, value in sorted(hits)[:args.limit]:
+            print(f"  {key:56s} {value}")
+        if len(hits) > args.limit:
+            print(f"  ... and {len(hits) - args.limit:,} more")
     return 0
 
 

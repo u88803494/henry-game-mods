@@ -1,10 +1,11 @@
 # Total War Saga: TROY — DB Table Parser
 
-Reads the game's own **DB tables** straight out of its PackFiles, without RPFM
-or any other GUI tool. Two small modules:
+Reads and writes the game's own **DB tables** straight out of its PackFiles,
+without RPFM or any other GUI tool. Three modules:
 
-- `packfile.py` — unpacks the PFH5 container (`data_db.pack`, `data.pack`, `local_zh.pack`, ...)
-- `db.py` — decodes a binary DB table into plain Python dicts
+- `packfile.py` — unpacks and builds PFH5 containers (`data_db.pack`, `data.pack`, `local_zh.pack`, mod packs)
+- `db.py` — decodes a binary DB table into plain Python dicts, and encodes them back
+- `loc.py` — reads the localisation tables, so keys can be shown as in-game names
 
 ## Why this exists, next to `save-parser/`
 
@@ -52,62 +53,87 @@ evidence the decode was right — the byte count is.
 
 ## Status
 
-Verified exact on, among others:
+**All 802 tables in `data_db.pack` decode, and all 802 re-encode byte-exact.**
+`roundtrip_test.py` is the gate:
 
-| table | version | rows |
-|---|---|---|
-| `missile_weapons` | 11 | 104 |
-| `projectiles` | 46 | 125 |
+```bash
+python3 roundtrip_test.py     # decode -> encode -> compare, exits non-zero on any mismatch
+```
 
-Known failures: **`missions`** (version 9) and **`land_units`** (version 44)
-both run off the end of the blob. Diagnosed so far: the schema *does* define
-those versions, and every field type they use (`StringU8`, `OptionalStringU8`,
-`I32`, `F32`, `Boolean`) is already implemented — so it isn't a missing type.
-Most likely the field list is subtly wrong for this build of the game, which
-would make `patches.ron` from the same schema repo the next thing to try.
+Two things were needed to get every table, both worth knowing before touching
+another Total War title:
 
-Until that's fixed, unit-level lookups (which weapon a given unit carries) and
-mission definitions aren't reachable; weapon- and projectile-level data is.
+- **Tables predating the version marker carry no version at all.** Their schema
+  is filed under `0`. `decode()` looks up `0` in that case but reports `version`
+  as `None`, so `encode()` knows not to write a marker back.
+- **A schema can define more fields than a given build stores.** `land_units`
+  v44 defines 63 but this build has 61 (`onscreen_name` and `concealed_name`
+  came later). `decode()` drops trailing fields and retries, accepting only an
+  exact byte match — so a shortened list can't be mistaken for a correct one.
+
+Do **not** sort fields by `ca_order`: that is the assembly-kit display order,
+not the serialisation order. `projectiles_tables` proves it — its `ca_order`
+runs `0,1,2,3,5,…,16,4,17` while file order decodes byte-exact.
 
 ## Localisation: keys to in-game names
 
-Everything above speaks in keys. `loc.py` turns them into what the game
-actually shows:
+Everything above speaks in keys. `loc.py` turns them into what the game shows:
 
 ```bash
-python3 loc.py "/Users/Shared/Epic Games/TotalWarSagaTROY/TroyData/data/local_zh.pack" growth
+python3 loc.py ".../local_zh.pack"                      # counts
+python3 loc.py ".../local_zh.pack" growth               # search record keys
+python3 loc.py ".../local_zh.pack" --export loc_zh.json # cache for other tools
 ```
 
 ```python
-from loc import load_from_pack, display_name
+from loc import load_index, display_name
 
-loc = load_from_pack(".../local_zh.pack")          # 60,061 entries
-display_name(loc, "troy_amazons_penthesilea_horde_growth_3")   # '家奴'
-display_name(loc, "troy_dlc1_ama_pen_furies")                  # '憤怒者'
+index = load_index(".../local_zh.pack")
+display_name(index, "troy_dlc1_ama_pen_furies")                 # '憤怒者'
+display_name(index, "troy_amazons_penthesilea_horde_growth_3")  # '家奴'
 ```
 
+`../save-parser/watch_saves.py` imports `display_name` from here rather than
+carrying its own copy, so there is one implementation. It loads the exported
+JSON instead of the 12 MB pack, because a watcher parses saves continuously
+and shouldn't re-read the language pack every time.
+
+### Two indexes
+
+Loc keys are `<table>_<field>_<record key>`:
+
+    land_units_onscreen_name_troy_dlc1_ama_pen_furies
+
+but saves and DB rows store the bare record key. So `load_index()` returns
+both: `full` keeps loc keys verbatim (60,061 entries), `short` strips the
+table prefix so a record key looks up directly (6,949). Some tables also glue
+a culture suffix onto the record key, which has to come off the right as well
+— see `PREFIXES` and `SUFFIXES`.
+
+### Why this matters
+
+Working from keys alone invites plausible but wrong translations. `pen_furies`
+reads as "Furies", the Greek Erinyes, but the game calls them **憤怒者**;
+`pen_hippomachoi` is **亞馬遜槍騎兵** in-game, not a transliteration;
+`gen_oathsworn` is **守誓者**, not 誓約者. Analysis written in invented names
+doesn't survive contact with the actual UI.
+
+### Format
+
+    FF FE        byte order mark
+    "LOC"        3 bytes ASCII
+    00           one padding byte
+    u32          version (1 in shipped files)
+    u32          entry count
+    entries...   key + text + one trailing tooltip flag byte
+
+Strings are a u16 *character* count followed by that many UTF-16LE units —
+characters, not bytes. Same acceptance rule as DB tables: a correct parse
+consumes the blob exactly, otherwise `parse_loc` raises.
+
 The language packs are SEGA/Creative Assembly's own text and are **not**
-redistributed here — read them from the game install (`local_zh.pack` for
-Traditional Chinese, `local_en.pack` for English, next to `data.pack`).
-
-`display_name()` tries each known naming convention in turn, because a key can
-be filed under several tables (`building_levels_onscreen_name_`,
-`land_units_onscreen_name_`, `missions_localised_title_`, and so on).
-`building_culture_variants_name_` needs special handling: it appends the
-subculture straight onto the building key with no separator, so an exact
-lookup misses and a prefix scan is required.
-
-This matters more than it sounds. Working from keys alone invites plausible
-but wrong translations — `pen_furies` reads as "Furies", the Greek Erinyes,
-but the game calls them **憤怒者**; `pen_hippomachoi` is not a transliteration
-in-game but **亞馬遜槍騎兵**. Analysis written in invented names doesn't
-survive contact with the actual UI.
-
-LOC format: `FF FE` BOM, `"LOC"`, one padding byte, u32 version, u32 count,
-then entries of key + value + one trailing bool. Strings are a u16 *character*
-count followed by that many UTF-16LE units — characters, not bytes. As with DB
-tables, a correct parse consumes the blob exactly, and `parse_loc` raises if
-it doesn't.
+redistributed here; read them from the game install, and treat exported JSON
+as a local cache (it is gitignored).
 
 ## Format notes
 
