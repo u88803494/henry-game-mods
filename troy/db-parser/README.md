@@ -69,6 +69,46 @@ would make `patches.ron` from the same schema repo the next thing to try.
 Until that's fixed, unit-level lookups (which weapon a given unit carries) and
 mission definitions aren't reachable; weapon- and projectile-level data is.
 
+## Localisation: keys to in-game names
+
+Everything above speaks in keys. `loc.py` turns them into what the game
+actually shows:
+
+```bash
+python3 loc.py "/Users/Shared/Epic Games/TotalWarSagaTROY/TroyData/data/local_zh.pack" growth
+```
+
+```python
+from loc import load_from_pack, display_name
+
+loc = load_from_pack(".../local_zh.pack")          # 60,061 entries
+display_name(loc, "troy_amazons_penthesilea_horde_growth_3")   # '家奴'
+display_name(loc, "troy_dlc1_ama_pen_furies")                  # '憤怒者'
+```
+
+The language packs are SEGA/Creative Assembly's own text and are **not**
+redistributed here — read them from the game install (`local_zh.pack` for
+Traditional Chinese, `local_en.pack` for English, next to `data.pack`).
+
+`display_name()` tries each known naming convention in turn, because a key can
+be filed under several tables (`building_levels_onscreen_name_`,
+`land_units_onscreen_name_`, `missions_localised_title_`, and so on).
+`building_culture_variants_name_` needs special handling: it appends the
+subculture straight onto the building key with no separator, so an exact
+lookup misses and a prefix scan is required.
+
+This matters more than it sounds. Working from keys alone invites plausible
+but wrong translations — `pen_furies` reads as "Furies", the Greek Erinyes,
+but the game calls them **憤怒者**; `pen_hippomachoi` is not a transliteration
+in-game but **亞馬遜槍騎兵**. Analysis written in invented names doesn't
+survive contact with the actual UI.
+
+LOC format: `FF FE` BOM, `"LOC"`, one padding byte, u32 version, u32 count,
+then entries of key + value + one trailing bool. Strings are a u16 *character*
+count followed by that many UTF-16LE units — characters, not bytes. As with DB
+tables, a correct parse consumes the blob exactly, and `parse_loc` raises if
+it doesn't.
+
 ## Format notes
 
 Both files carry the format details in their module docstrings — PFH5 header
