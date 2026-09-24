@@ -5,6 +5,9 @@
 - [`tw-upgrade-stats/`](tw-upgrade-stats/) — adds real numbers to the
   official Traditional Chinese client's upgrade buttons and unit cards.
   為官方繁體中文版的升級按鈕與單位卡補上實際數值。
+- [`tw-civ-emblems/`](tw-civ-emblems/) — overlays a Traditional Chinese
+  abbreviation on each civilization's emblem badge (scoreboard & tech
+  tree). 在每個文明的徽章上疊繁體中文縮寫（計分板與科技樹畫面）。
 
 ## Installing
 
