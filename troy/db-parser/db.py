@@ -119,10 +119,12 @@ class Reader:
         return self._unpack("<q", 8)
 
     def f32(self):
-        return round(self._unpack("<f", 4), 4)
+        # No rounding: round(x, 4) is lossy and would stop encode() from
+        # reproducing the original bytes. Round at the point of display.
+        return self._unpack("<f", 4)
 
     def f64(self):
-        return round(self._unpack("<d", 8), 4)
+        return self._unpack("<d", 8)
 
     def str_u8(self):
         length = self.u16()
@@ -152,6 +154,138 @@ READERS = {
 }
 
 
+class Writer:
+    """Little-endian byte builder — the mirror of Reader."""
+
+    def __init__(self):
+        self.parts = []
+
+    def u8(self, value):
+        self.parts.append(bytes((value & 0xFF,)))
+
+    def u16(self, value):
+        self.parts.append(struct.pack("<H", value))
+
+    def i16(self, value):
+        self.parts.append(struct.pack("<h", value))
+
+    def i32(self, value):
+        self.parts.append(struct.pack("<i", value))
+
+    def i64(self, value):
+        self.parts.append(struct.pack("<q", value))
+
+    def f32(self, value):
+        self.parts.append(struct.pack("<f", value))
+
+    def f64(self, value):
+        self.parts.append(struct.pack("<d", value))
+
+    def str_u8(self, value):
+        raw = value.encode("utf-8")
+        self.u16(len(raw))
+        self.parts.append(raw)
+
+    def str_u16(self, value):
+        raw = value.encode("utf-16-le")
+        self.u16(len(raw) // 2)
+        self.parts.append(raw)
+
+    def optional_str_u8(self, value):
+        # Vanilla never stores a present-but-empty optional string (verified
+        # across all 802 tables: 106,644 present, 181,062 absent, 0 empty), so
+        # "" unambiguously means absent and the round trip stays exact.
+        if value:
+            self.u8(1)
+            self.str_u8(value)
+        else:
+            self.u8(0)
+
+    def optional_str_u16(self, value):
+        if value:
+            self.u8(1)
+            self.str_u16(value)
+        else:
+            self.u8(0)
+
+    def getvalue(self):
+        return b"".join(self.parts)
+
+
+WRITERS = {
+    "StringU8": lambda w, v: w.str_u8(v),
+    "OptionalStringU8": lambda w, v: w.optional_str_u8(v),
+    "StringU16": lambda w, v: w.str_u16(v),
+    "OptionalStringU16": lambda w, v: w.optional_str_u16(v),
+    "I16": lambda w, v: w.i16(v),
+    "I32": lambda w, v: w.i32(v),
+    "I64": lambda w, v: w.i64(v),
+    "F32": lambda w, v: w.f32(v),
+    "F64": lambda w, v: w.f64(v),
+    "Boolean": lambda w, v: w.u8(1 if v else 0),
+    "ColourRGB": lambda w, v: w.i32(v),
+}
+
+
+def encode(rows, fields, header=None):
+    """Serialise rows back into a table blob — the mirror of decode().
+
+    `header` is the dict from read_header(); pass the one you decoded so the
+    GUID, version marker and record count are reproduced exactly. Omit it and
+    you get a bare table with no GUID and no version marker, which the game
+    will reject for any table that normally has them.
+
+    Round-tripping vanilla (decode -> encode) reproduces the original bytes
+    exactly; `roundtrip_test.py` asserts this across every table in the pack.
+    """
+    header = header or {}
+    writer = Writer()
+
+    guid = header.get("guid")
+    if guid is not None:
+        writer.parts.append(GUID_MARKER)
+        writer.str_u16(guid)
+
+    version = header.get("version")
+    if version is not None:
+        writer.parts.append(VERSION_MARKER)
+        writer.i32(version)
+
+    writer.u8(header.get("mystery", 1))
+    writer.i32(len(rows))
+
+    for row in rows:
+        for fname, ftype in fields:
+            WRITERS[ftype](writer, row[fname])
+    return writer.getvalue()
+
+
+def read_header(blob):
+    """Split a table blob into its header and the offset where records start.
+
+    Returns (header, body_offset). `header` carries everything encode() needs
+    to rebuild the prologue byte-for-byte:
+
+        guid     GUID string, or None when the blob has no GUID marker
+        version  table version, or None when there is no version marker —
+                 tables predating the marker must NOT get one bolted on
+        mystery  the single byte after the version (always 1 in vanilla)
+        count    record count
+    """
+    reader = Reader(blob)
+    guid = None
+    if blob[:4] == GUID_MARKER:
+        reader.pos = 4
+        guid = reader.str_u16()
+    version = None
+    if blob[reader.pos:reader.pos + 4] == VERSION_MARKER:
+        reader.pos += 4
+        version = reader.i32()
+    mystery = reader.u8()
+    count = reader.i32()
+    return {"guid": guid, "version": version, "mystery": mystery, "count": count}, reader.pos
+
+
 def decode(blob, versions, name=""):
     """Decode one table blob. Returns (version, fields, rows, bytes_consumed).
 
@@ -163,19 +297,14 @@ def decode(blob, versions, name=""):
     `concealed_name` are absent). Only an exact byte match is accepted, so a
     shortened field list can't be mistaken for a correct one.
     """
+    header, start = read_header(blob)
+    version, count = header["version"], header["count"]
     reader = Reader(blob)
-    if blob[:4] == GUID_MARKER:
-        reader.pos = 4
-        reader.str_u16()
-    version = None
-    if blob[reader.pos:reader.pos + 4] == VERSION_MARKER:
-        reader.pos += 4
-        version = reader.i32()
-    reader.u8()
-    count = reader.i32()
-    start = reader.pos
 
-    fields = versions.get(version)
+    # Tables predating the version marker carry no version at all; their schema
+    # is filed under 0. `version` stays None so encode() knows not to write a
+    # marker back, but the lookup uses 0.
+    fields = versions.get(0 if version is None else version)
     if fields is None:
         raise KeyError(f"{name}: no schema for version {version} (have {sorted(versions)})")
 
@@ -210,6 +339,25 @@ def read_table(pack_path, table, schema_path):
     return version, fields, rows, used, len(blob)
 
 
+def read_table_full(pack_path, table, schema_path):
+    """Like read_table(), but also returns the header needed to re-encode.
+
+    Returns (header, fields, rows). Feed header straight back into encode().
+    """
+    data, index, _ = read_pack(pack_path)
+    key = f"db\\{table}_tables\\data__"
+    if key not in index:
+        raise KeyError(f"{key} not in pack")
+    offset, size, _flag = index[key]
+    blob = data[offset:offset + size]
+    schema = load_schema(schema_path)
+    header, _start = read_header(blob)
+    _version, fields, rows, used = decode(blob, schema[f"{table}_tables"], table)
+    if used != len(blob):
+        raise ValueError(f"{table}: decode consumed {used}/{len(blob)} bytes")
+    return header, fields, rows
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("pack")
@@ -224,7 +372,7 @@ def main():
     print(f"decoded {used}/{total} bytes {'(exact)' if exact else '(MISMATCH — schema is wrong)'}")
     print("fields:", ", ".join(f"{n}:{t}" for n, t in fields))
     for row in rows[:args.limit]:
-        print(" ", row)
+        print(" ", {k: (round(v, 4) if isinstance(v, float) else v) for k, v in row.items()})
     return 0 if exact else 1
 
 
