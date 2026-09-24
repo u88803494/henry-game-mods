@@ -22,9 +22,15 @@ local ACTIONS = {
     prayer   = {holder = "prayer_holder",   label = "祈禱"},
 }
 
--- Remind again this many turns after the last hecatomb, even when the gods
--- panel is closed and we cannot read the button state.
-local REMIND_AFTER_TURNS = 5
+-- From campaign_variables: a hecatomb costs 5 turns of cooldown and grants
+-- +70 favour to the chosen god; prayers come back after a single turn.
+local HECATOMB_COOLDOWN_TURNS = 5
+local HECATOMB_FAVOUR_GAIN = 70
+
+-- Fallback used only when the gods panel is closed and the button state is
+-- unreadable. Prayers are deliberately excluded: a 1-turn cooldown means they
+-- are almost always available, so a turn-count reminder would fire constantly.
+local REMIND_AFTER_TURNS = HECATOMB_COOLDOWN_TURNS
 
 local SAVED_LAST_HECATOMB = "hecatomb_reminder_last_turn"
 
@@ -115,7 +121,8 @@ local function check(at_end_turn)
     end
 
     if #pending > 0 then
-        log("可以舉辦但尚未舉辦：" .. table.concat(pending, "、"))
+        log(string.format("可以舉辦但尚未舉辦：%s（百牲祭給 +%d 好感）",
+            table.concat(pending, "、"), HECATOMB_FAVOUR_GAIN))
         report_favour()
         return true
     end
